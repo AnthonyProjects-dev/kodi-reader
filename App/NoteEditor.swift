@@ -294,6 +294,13 @@ struct NoteEditor: View {
             Button("Markdown Source") { mode = .source }
             Button("Preview") { mode = .preview }
             Divider()
+            Menu("Export Note") {
+                ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                    Button(format.label) { exportNote(format) }
+                }
+            }
+            .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !annotation.hasDrawing)
+            Divider()
             Text("⌘B Bold · ⌘I Italic · ⌘U Underline")
             Text("⌘K Link · ⇧⌘X Strikethrough")
             Text("⌥⌘1 Heading · ⌥⌘0 Body")
@@ -484,6 +491,18 @@ struct NoteEditor: View {
         if let latestDrawing { onSaveDrawing?(latestDrawing.0, latestDrawing.1) { _ in } }
         if teardown { onDrawActiveChanged?(false) }
         flushDrawingBeforeClose(teardown: teardown, completion: completion)
+    }
+
+    private func exportNote(_ format: NoteExportFormat) {
+        // Export the current editor buffer, including changes awaiting autosave.
+        var snapshot = annotation
+        snapshot.note = text
+        NotesExporter.presentSavePanel(
+            format: format,
+            bookTitle: model.book?.title ?? model.record?.title ?? "Untitled",
+            author: model.book?.author ?? model.record?.author ?? "Unknown Author",
+            annotations: [snapshot]
+        )
     }
 
     private func askAIAboutHighlight() {

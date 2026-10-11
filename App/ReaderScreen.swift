@@ -458,10 +458,12 @@ struct ReaderScreen: View {
                             onSelect: { reader.go(to: $0) },
                             onEdit: { openNoteEditor($0, autofocus: !$0.hasContent) },
                             onDelete: { deleteAnnotation($0.id) },
-                            onExport: {
+                            onExport: { format in
                                 NotesExporter.presentSavePanel(
+                                    format: format,
                                     bookTitle: model.record?.title ?? book.title,
-                                    markdown: model.exportNotesMarkdown()
+                                    author: model.record?.author ?? book.author,
+                                    annotations: model.record?.annotations ?? []
                                 )
                             }
                         )

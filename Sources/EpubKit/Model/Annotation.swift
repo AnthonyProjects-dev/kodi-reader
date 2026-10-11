@@ -552,7 +552,7 @@ public enum NoteMarkdown {
         let authorLine = author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "Unknown Author"
             : author
-        var parts: [String] = ["# Notes — \(bookTitle)", authorLine, ""]
+        var parts: [String] = ["# Notes — \(exportLiteral(bookTitle))", exportLiteral(authorLine), ""]
         let noted = annotations
             .filter(\.hasContent)
             .sorted {
@@ -570,24 +570,34 @@ public enum NoteMarkdown {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let chapterHeading = (chapter?.isEmpty == false) ? chapter! : "Untitled section"
 
-            parts.append("### \(chapterHeading)")
+            parts.append("### \(exportLiteral(chapterHeading))")
             parts.append("")
-            parts.append(blockquote(annotation.text))
+            parts.append(blockquote(exportLiteral(annotation.text)))
             parts.append("")
-            parts.append("*— \(chapterHeading), \(authorLine), \(bookTitle)*")
+            parts.append("*— \(exportLiteral(chapterHeading)), \(exportLiteral(authorLine)), \(exportLiteral(bookTitle))*")
             parts.append("")
             if annotation.hasNote {
                 parts.append(annotation.note ?? "")
                 parts.append("")
             }
             if annotation.hasDrawing {
-                parts.append("_Visual note attached._")
+                parts.append("_Visual note attached in Kodi Reader; drawing is not included in this export._")
                 parts.append("")
             }
             parts.append("---")
             parts.append("")
         }
         return parts.joined(separator: "\n")
+    }
+
+    /// Book text is literal source material, even when it contains Markdown syntax.
+    private static func exportLiteral(_ text: String) -> String {
+        var result = ""
+        for character in text {
+            if "\\`*_[]<>#|".contains(character) { result.append("\\") }
+            result.append(character)
+        }
+        return result
     }
 
     /// Prefixes each line with `> ` for a Markdown blockquote.

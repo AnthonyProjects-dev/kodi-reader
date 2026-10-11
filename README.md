@@ -27,6 +27,14 @@ the original file keeps its name, and reading data stays attached.
 ### Notes taking
 Text highlights in multiple colors, each with an attached note, stored alongside the book.
 
+Export all notes from the notes sidebar’s export menu, or one note from its
+**… → Export Note** menu. Choose Markdown (`.md`), Word (`.docx`), Apple Notes
+(`.html`), or Notion (`.md`). Each export includes the referenced passage,
+chapter, book title, author, and note body. Import the HTML file through
+Apple Notes’ **File → Import to Notes**, or the Markdown file through Notion’s
+**Settings → Import → Text & Markdown**. Drawing notes include their passage
+and a notice; the drawing itself is not embedded.
+
 ![Highlight with a note](docs/screenshots/app-note-editor.png)
 
 ### Visual notes

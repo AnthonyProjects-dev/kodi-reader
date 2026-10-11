@@ -288,7 +288,7 @@ struct AnnotationsInspector: View {
     let onSelect: (Locator) -> Void
     let onEdit: (Annotation) -> Void
     let onDelete: (Annotation) -> Void
-    let onExport: () -> Void
+    let onExport: (NoteExportFormat) -> Void
 
     @State private var query = ""
     @State private var filter: NotesFilter = .all
@@ -420,15 +420,21 @@ struct AnnotationsInspector: View {
             }
             Spacer(minLength: 8)
             if annotations.contains(where: \.hasContent) {
-                Button(action: onExport) {
+                Menu {
+                    ForEach(NoteExportFormat.allCases, id: \.self) { format in
+                        Button(format.label) { onExport(format) }
+                    }
+                } label: {
                     Image(systemName: "square.and.arrow.up")
                         .frame(width: 28, height: 28)
                         .contentShape(.rect)
                 }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .foregroundStyle(model.settings.theme.muted)
-                .accessibilityLabel("Export notes")
-                .quickHelp("Export notes as Markdown")
+                .accessibilityLabel("Export all notes")
+                .quickHelp("Export all notes with referenced passages")
             }
         }
         .padding(.horizontal, 24)
@@ -627,17 +633,48 @@ extension HighlightColor {
     }
 }
 
-/// Presents a save panel and writes the book's notes as Markdown.
+/// File exports use importable formats without requiring account access.
+@MainActor
 enum NotesExporter {
-    static func presentSavePanel(bookTitle: String, markdown: String) {
+    static func data(format: NoteExportFormat, bookTitle: String, author: String, annotations: [Annotation]) throws -> Data {
+        switch format {
+        case .markdown, .notion:
+            return Data(NoteMarkdown.exportDocument(bookTitle: bookTitle, author: author, annotations: annotations).utf8)
+        case .appleNotes:
+            return Data(NoteExport.html(bookTitle: bookTitle, author: author, annotations: annotations).utf8)
+        case .word:
+            let html = Data(NoteExport.html(bookTitle: bookTitle, author: author, annotations: annotations).utf8)
+            let document = try NSAttributedString(data: html, options: [
+                .documentType: NSAttributedString.DocumentType.html,
+                .characterEncoding: String.Encoding.utf8.rawValue,
+            ], documentAttributes: nil)
+            return try document.data(from: NSRange(location: 0, length: document.length), documentAttributes: [
+                .documentType: NSAttributedString.DocumentType.officeOpenXML,
+            ])
+        }
+    }
+
+    static func presentSavePanel(format: NoteExportFormat, bookTitle: String, author: String, annotations: [Annotation]) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText]
+        let contentType = UTType(filenameExtension: format.fileExtension) ?? .data
+        panel.allowedContentTypes = [contentType]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        panel.nameFieldStringValue = "Notes — \(bookTitle).md"
-        panel.message = "Export notes as Markdown"
+        let safeTitle = bookTitle.components(separatedBy: CharacterSet(charactersIn: "/:\\").union(.controlCharacters)).joined(separator: "-")
+        panel.nameFieldStringValue = "Notes — \(safeTitle).\(format.fileExtension)"
+        panel.title = "Export notes"
+        panel.message = format.instructions
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        try? markdown.write(to: url, atomically: true, encoding: .utf8)
+        do {
+            let output = try data(format: format, bookTitle: bookTitle, author: author, annotations: annotations)
+            try output.write(to: url, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t export notes"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
     }
 }

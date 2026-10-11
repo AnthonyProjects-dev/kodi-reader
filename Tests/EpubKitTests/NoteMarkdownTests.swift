@@ -411,7 +411,7 @@ final class NoteMarkdownTests: XCTestCase {
             annotations: [annotation]
         )
         XCTAssertTrue(markdown.contains("> sketched passage"))
-        XCTAssertTrue(markdown.contains("_Visual note attached._"))
+        XCTAssertTrue(markdown.contains("_Visual note attached in Kodi Reader; drawing is not included in this export._"))
         XCTAssertFalse(markdown.contains("_No notes yet._"))
     }
 

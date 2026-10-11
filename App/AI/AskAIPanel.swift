@@ -226,7 +226,7 @@ struct AskAIPanel: View {
                             .foregroundStyle(model.settings.theme.uiForeground)
                             .fixedSize(horizontal: false, vertical: true)
                         Text("Bring a passage here, or ask from where you are.")
-                            .font(.system(size: 13))
+                            .font(.system(size: 15))
                             .foregroundStyle(model.settings.theme.muted)
                             .lineSpacing(3)
                     }
@@ -275,7 +275,7 @@ struct AskAIPanel: View {
 
             if message.role == .assistant {
                 Label("KODI AI", systemImage: "sparkles")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(model.settings.theme.accent)
                 if message.text.isEmpty, model.chat.isStreaming {
                     ProgressView()
@@ -287,7 +287,7 @@ struct AskAIPanel: View {
                 }
             } else {
                 Text(message.text)
-                    .font(.system(size: 13))
+                    .font(.system(size: 16))
                     .lineSpacing(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: 260, alignment: .leading)
@@ -348,6 +348,7 @@ struct AskAIPanel: View {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Ask about this book…", text: inputBinding, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .font(.system(size: 16))
                     .lineLimit(1...8)
                     .focused($composerFocused)
                     .onSubmit {
@@ -842,11 +843,11 @@ private struct SelectableAIText: NSViewRepresentable {
             )
             let fullRange = NSRange(location: 0, length: value.length)
             value.enumerateAttribute(.font, in: fullRange) { fontValue, range, _ in
-                let original = fontValue as? NSFont ?? .systemFont(ofSize: 13)
+                let original = fontValue as? NSFont ?? .systemFont(ofSize: 16)
                 let traits = original.fontDescriptor.symbolicTraits
                 var font: NSFont = traits.contains(.monoSpace)
-                    ? .monospacedSystemFont(ofSize: 12.5, weight: .regular)
-                    : .systemFont(ofSize: 13)
+                    ? .monospacedSystemFont(ofSize: 15.5, weight: .regular)
+                    : .systemFont(ofSize: 16)
                 if traits.contains(.bold) {
                     font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
                 }
