@@ -6,6 +6,28 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>Kodi Reader</title>
         <item>
+            <title>0.4.4</title>
+            <pubDate>Sun, 11 Oct 2026 23:33:12 +0100</pubDate>
+            <link>https://www.kodi-reader.app</link>
+            <sparkle:version>10</sparkle:version>
+            <sparkle:shortVersionString>0.4.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# Kodi Reader 0.4.4
+
+- Export individual notes or all book notes as Markdown, Word (.docx), Apple Notes import files (.html), or Notion import files (.md).
+- Every export includes the referenced passage, chapter, book title, author, and note text. Individual exports include your latest edits. Drawing notes include a notice; drawings are not embedded.
+- Improve Ask AI text readability with larger message and composer text.
+
+- Clean up older Kodi Reader entries in Finder’s **Open With** menu when the installed app launches, including after an update.
+- Keep development builds and leftover packaging copies out of **Open With**.
+- Updates replace the previous installed release while preserving your books, notes, drawings, bookmarks, conversations, and reading position.
+
+The app and update feed are signed, and the download is notarized by Apple. Requires Apple Silicon and macOS 15 or later.
+]]></description>
+            <enclosure url="https://github.com/dev-olly/kodi-reader/releases/download/v0.4.4/KodiReader.dmg" length="8253843" type="application/octet-stream" sparkle:edSignature="O05p7FOzCTSzrVEGf5B0WNHxsnnKB0ye0wiPQ4wBKuy1PEzBjdarUPMMOxU6mMjWZ+H+UsHClsfw/kTXKw0jDw=="/>
+        </item>
+        <item>
             <title>0.4.3</title>
             <pubDate>Fri, 09 Oct 2026 17:39:40 +0100</pubDate>
             <link>https://www.kodi-reader.app</link>
@@ -47,35 +69,9 @@ The app and update feed are signed, and the download is notarized by Apple. Requ
 ]]></description>
             <enclosure url="https://github.com/dev-olly/kodi-reader/releases/download/v0.4.2/KodiReader.dmg" length="8211324" type="application/octet-stream" sparkle:edSignature="uzq56ccVeR0qxP0sAT0Ji0YVDuDuMWwTtMyg07kWffJU/KlGZC1pjkeLNpvXY6meznOJ5KSBHz4b/Bdqn9xDBw=="/>
         </item>
-        <item>
-            <title>0.4.1</title>
-            <pubDate>Wed, 30 Sep 2026 01:19:04 +0200</pubDate>
-            <link>https://www.kodi-reader.app</link>
-            <sparkle:version>7</sparkle:version>
-            <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# Kodi Reader 0.4.1
-
-This release adds optional iCloud sync so you can continue reading on another Mac.
-
-- Choose **Off**, **Notes only**, or **Books and notes** in Settings → iCloud. Sync is off until you enable it on each Mac.
-- Notes only syncs annotations, drawings, bookmarks, reading position, and book information. Import or locate the matching book file on each Mac.
-- Books and notes also syncs imported EPUBs, PDFs, and saved webpages. Books appear in the library before their files are downloaded; open one or choose **Download for Offline Reading** when you need it.
-- **Sync Ask AI history** is a separate opt-in for saved conversations and passage references. Drafts and account details stay local.
-- Sync status and **Sync Now** are available in Settings. You can keep reading and editing offline; pending changes resume when iCloud is available.
-
-Your private iCloud storage holds synced content and counts against your iCloud allowance. Kodi Reader does not require a separate sync account. Existing local books and notes remain available with sync off.
-
-This release is ready for cross-device testing. Before relying on sync as your only copy, complete the [two-Mac test checklist](https://github.com/dev-olly/kodi-reader/blob/main/docs/icloud-two-mac-test.md).
-
-The app and update feed are signed, and the download is notarized by Apple. Requires Apple Silicon and macOS 15 or later.
-]]></description>
-            <enclosure url="https://github.com/dev-olly/kodi-reader/releases/download/v0.4.1/KodiReader.dmg" length="7922951" type="application/octet-stream" sparkle:edSignature="75scz3RvpjGrc+JhfMGdyqy96mpY4mBpYRJUJzeFpDrjWqY8pZTgjKcgCp/AI5lKv4cFmPV2h5fYzZM/vec7BQ=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: zFKnTNFpn9gt4tDH1cORMw0uS4hGXIuchP9gHr9OomaT2N6iplnA6R2ma05iKLdNkSIP6Mpt3bTEiTotRaSaDw==
-length: 6416
+edSignature: n8CIdRpSEKLVbiJ1uyW38yNA8hTp4k/O92oW9dn8bV+m5d0DWaT7XB8IWV+am4b+vxe63aNZOsOiEHfPCWmqAA==
+length: 5913
 -->
