@@ -1,13 +1,15 @@
 import { File } from 'expo-file-system';
+import { randomUUID } from 'expo-crypto';
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Linking, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 
-import { runtimeURL } from './runtime';
+import { bookRuntimeURL, ensureBookRuntimeInstalled } from './runtime';
+import { injectChapterHead } from './chapterDocument';
 import { highlightPayload, inlineStyle, cssVariables, runtimeOptions } from './settingsToCss';
 import { chapterTitle as chapterTitleFor, spineIndexForPath } from '@/lib/epub/parse';
 import { extensionOf, resolveHref, splitFragment } from '@/lib/epub/path';
-import { directoryAt, directoryURL, rootDirectory } from '@/lib/files';
+import { directoryAt, directoryURL } from '@/lib/files';
 import type { Palette } from '@/lib/theme';
 import type { Annotation, BookRecord, Locator, Publication, ReaderSettings, TextPosition } from '@/lib/types';
 
@@ -64,6 +66,7 @@ type Slot = {
   /** Annotations array the chapter booted with, to detect highlights changed while it loaded. */
   annotations: Annotation[] | null;
   generation: number;
+  documentToken: string;
 };
 
 type SlotIndex = 0 | 1;
@@ -108,10 +111,12 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
   const webViewRefs = [useRef<WebView>(null), useRef<WebView>(null)] as const;
   const [sources, setSources] = useState<[Source, Source]>([BLANK, null]);
   const [active, setActive] = useState<SlotIndex>(0);
+  const [runtimeBookID, setRuntimeBookID] = useState<string | null>(null);
+  const bookID = book?.id;
   const activeRef = useRef<SlotIndex>(0);
   const slotsRef = useRef<[Slot, Slot]>([
-    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0 },
-    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0 },
+    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0, documentToken: '' },
+    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0, documentToken: '' },
   ]);
   const preloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const configureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -119,7 +124,7 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
   const extractedDirectory = useMemo(() => directoryAt(book?.extractedRelativePath ?? ''), [book?.extractedRelativePath]);
   const readingOrder = useMemo(() => publication?.readingOrder ?? [], [publication]);
   const weights = useMemo(() => publication?.weights ?? [], [publication]);
-  const readAccessURL = useMemo(() => directoryURL(rootDirectory) + '/', []);
+  const readAccessURL = useMemo(() => directoryURL(extractedDirectory) + '/', [extractedDirectory]);
   const totalWeight = useMemo(() => weights.reduce((sum, weight) => sum + weight, 0), [weights]);
 
   const overallProgress = useCallback(
@@ -179,23 +184,19 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
       state.annotations = annotations;
       state.generation += 1;
 
-      const boot = { options: { ...options, spineIndex: index }, target, highlights: highlightsFor(index) };
+      const nonce = randomUUID();
+      state.documentToken = nonce;
+      const boot = { documentToken: nonce, options: { ...options, spineIndex: index }, target, highlights: highlightsFor(index) };
       const tags = [
         '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>',
         `<style id="kodi-boot">${inlineStyle(cssVariables(settings, palette, width, insets))}</style>`,
-        `<link rel="stylesheet" type="text/css" href="${runtimeURL('reader.css')}"/>`,
-        `<script>window.__kodiBoot = ${scriptJSON(boot)};</script>`,
-        `<script src="${runtimeURL('reader.js')}"></script>`,
-        `<script src="${runtimeURL('bridge.js')}"></script>`,
+        `<link rel="stylesheet" type="text/css" href="${bookRuntimeURL(extractedDirectory, 'reader.css')}"/>`,
+        `<script nonce="${nonce}">window.__kodiBoot = ${scriptJSON(boot)};</script>`,
+        `<script nonce="${nonce}" src="${bookRuntimeURL(extractedDirectory, 'reader.js')}"></script>`,
+        `<script nonce="${nonce}" src="${bookRuntimeURL(extractedDirectory, 'bridge.js')}"></script>`,
       ].join('\n');
 
-      const headClose = html.search(/<\/head>/i);
-      if (headClose >= 0) {
-        html = `${html.slice(0, headClose)}${tags}\n${html.slice(headClose)}`;
-      } else {
-        const bodyOpen = html.search(/<body/i);
-        html = bodyOpen >= 0 ? `${html.slice(0, bodyOpen)}<head>${tags}</head>\n${html.slice(bodyOpen)}` : tags + html;
-      }
+      html = injectChapterHead(html, tags, nonce);
 
       // Alternate between two names per slot so every load is a navigation to a
       // new URL. Reloading the same file URL is far slower in WKWebView.
@@ -288,19 +289,36 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
     [promote, loadSpine],
   );
 
+  // Install trusted scripts inside the book before restricting WebKit's read access.
+  useEffect(() => {
+    let cancelled = false;
+    setRuntimeBookID(null);
+    if (!bookID) return;
+    onLoadingChange(true);
+    ensureBookRuntimeInstalled(extractedDirectory).then(() => {
+      if (!cancelled) setRuntimeBookID(bookID);
+    }).catch((error) => {
+      if (cancelled) return;
+      onLoadingChange(false);
+      onError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { cancelled = true; };
+  }, [bookID, extractedDirectory, onLoadingChange, onError]);
+
   // Each new book reuses the same web views: forget what they held, then load.
   useEffect(() => {
     if (preloadTimer.current) clearTimeout(preloadTimer.current);
     for (const state of slotsRef.current) {
       state.spineIndex = -1;
       state.ready = false;
+      state.documentToken = '';
     }
-    if (!book || readingOrder.length === 0) return;
+    if (!book || runtimeBookID !== book.id || readingOrder.length === 0) return;
     const locator = initialLocator && initialLocator.kind !== 'pdf' ? initialLocator : undefined;
     const index = Math.min(Math.max(locator?.spineIndex ?? 0, 0), readingOrder.length - 1);
     loadSpine(index, { position: locator?.start.elementPath.length ? locator.start : undefined });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book?.id, publication]);
+  }, [book?.id, publication, runtimeBookID]);
 
   useEffect(
     () => () => {
@@ -378,6 +396,7 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
         return;
       }
       const state = slotsRef.current[slot];
+      if (!state.documentToken || body.documentToken !== state.documentToken) return;
       const isActive = slot === activeRef.current;
 
       if (body.type === 'booted') {
@@ -451,8 +470,8 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
   useImperativeHandle(
     ref,
     () => ({
-      nextPage: () => evaluate('if (window.__reader && !__reader.nextPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedEnd" }))'),
-      previousPage: () => evaluate('if (window.__reader && !__reader.previousPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedStart" }))'),
+      nextPage: () => evaluate('if (window.__reader && !__reader.nextPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedEnd", documentToken: window.__kodiBoot.documentToken }))'),
+      previousPage: () => evaluate('if (window.__reader && !__reader.previousPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedStart", documentToken: window.__kodiBoot.documentToken }))'),
       nextChapter: () => showChapter(slotsRef.current[activeRef.current].spineIndex + 1),
       previousChapter: () => showChapter(slotsRef.current[activeRef.current].spineIndex - 1),
       goToLocator: (locator) => {
@@ -500,8 +519,6 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
           originWhitelist={['file://*', 'about:*']}
           allowingReadAccessToURL={readAccessURL}
           allowFileAccess
-          allowFileAccessFromFileURLs
-          allowUniversalAccessFromFileURLs
           onMessage={slot === 0 ? onMessage0 : onMessage1}
           scrollEnabled={false}
           bounces={false}

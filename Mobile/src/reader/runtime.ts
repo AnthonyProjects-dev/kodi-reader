@@ -1,7 +1,7 @@
 import { Asset } from 'expo-asset';
-import { File } from 'expo-file-system';
+import { Directory, File } from 'expo-file-system';
 
-import { ensureLayout, runtimeDirectory } from '@/lib/files';
+import { ensureDirectory, ensureLayout, runtimeDirectory } from '@/lib/files';
 
 // Static asset references must be require() calls for Metro to bundle them.
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -30,7 +30,7 @@ export function ensureRuntimeInstalled(): Promise<void> {
         if (!asset.localUri) throw new Error(`Reader runtime asset ${entry.name} is unavailable.`);
         const target = new File(runtimeDirectory, entry.name);
         if (target.exists) target.delete();
-        new File(asset.localUri).copy(target);
+        await new File(asset.localUri).copy(target);
       }
     })().catch((error) => {
       installed = null;
@@ -44,6 +44,21 @@ export type RuntimeFileName = 'reader.js' | 'reader.css' | 'bridge.js' | 'readab
 
 export function runtimeURL(name: RuntimeFileName): string {
   return new File(runtimeDirectory, name).uri;
+}
+
+type BookRuntimeFile = 'reader.js' | 'reader.css' | 'bridge.js';
+
+/** Only these trusted assets need to be readable alongside a book's files. */
+export async function ensureBookRuntimeInstalled(directory: Directory): Promise<void> {
+  await ensureRuntimeInstalled();
+  const target = ensureDirectory(new Directory(directory, '.kodi-runtime'));
+  await Promise.all((['reader.js', 'reader.css', 'bridge.js'] as const).map((name) =>
+    new File(runtimeDirectory, name).copy(new File(target, name), { overwrite: true }),
+  ));
+}
+
+export function bookRuntimeURL(directory: Directory, name: BookRuntimeFile): string {
+  return new File(directory, '.kodi-runtime', name).uri;
 }
 
 /** Source text of a runtime file, for injection into a page. */

@@ -10,8 +10,8 @@ import { Directory, File, Paths } from 'expo-file-system';
  *     Covers/<id>.<ext>     cover images for the library
  *     runtime/              reader.js, reader.css, bridge.js
  *
- * The web view gets read access to `Kodi/` as a whole, so chapter files can
- * reference the runtime by absolute file URL.
+ * Reader web views only get access to their own extraction directory. Trusted
+ * runtime files are copied into each book; library.json stays outside it.
  */
 export const rootDirectory = new Directory(Paths.document, 'Kodi');
 export const booksDirectory = new Directory(rootDirectory, 'Books');
@@ -47,7 +47,8 @@ export function directoryAt(relativePath: string): Directory {
 /** Only alphanumerics, dash, underscore and dot survive into a file name. */
 export function sanitizedFileName(id: string): string {
   const cleaned = id.replace(/[^A-Za-z0-9\-_.]/g, '-');
-  return (cleaned || 'book').slice(0, 120);
+  const name = (cleaned || 'book').slice(0, 120);
+  return name === '.' || name === '..' ? 'book' : name;
 }
 
 /** Decoded, trailing-slash-free file URL for a directory. */

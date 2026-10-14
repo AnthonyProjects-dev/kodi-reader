@@ -16,7 +16,7 @@ import { HighlightPalette } from '@/components/HighlightPalette';
 import { Typography } from '@/components/Typography';
 import { usePalette } from '@/hooks/use-palette';
 import { loadPublication } from '@/lib/epub/book';
-import { directoryURL, fileAt, rootDirectory } from '@/lib/files';
+import { fileAt } from '@/lib/files';
 import { addAnnotation, deleteAnnotation, makeID, savePosition, touchBook, updateAnnotation, useBook, useSettings } from '@/lib/store';
 import { Fonts, Spacing } from '@/lib/theme';
 import type { Annotation, HighlightColor, Locator, Publication } from '@/lib/types';
@@ -244,7 +244,7 @@ export function ReaderOverlay() {
       {showUI && book.kind === 'pdf' ? (
         <WebView
           source={{ uri: fileAt(book.importedRelativePath).uri }}
-          allowingReadAccessToURL={directoryURL(rootDirectory) + '/'}
+          allowingReadAccessToURL={fileAt(book.importedRelativePath).uri}
           allowFileAccess
           originWhitelist={['*']}
           style={[StyleSheet.absoluteFill, { backgroundColor: palette.page }]}

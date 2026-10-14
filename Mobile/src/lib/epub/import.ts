@@ -1,21 +1,13 @@
 import { Directory, File } from 'expo-file-system';
+import { randomUUID } from 'expo-crypto';
 import { unzipSync } from 'fflate';
 
 import { directorySource } from './book';
+import { documentID } from './identity';
 import { extensionOf } from './path';
 import { parsePublication } from './parse';
 import { booksDirectory, coversDirectory, directoryAt, ensureDirectory, ensureLayout, extractedDirectory, fileAt, sanitizedFileName } from '../files';
 import type { BookRecord, DocumentKind } from '../types';
-
-/** Small, stable hash for books without an identifier. */
-function hashString(input: string): string {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
 
 function kindFor(name: string, mimeType?: string | null): DocumentKind {
   if (mimeType === 'application/pdf' || extensionOf(name) === 'pdf') return 'pdf';
@@ -30,8 +22,7 @@ function utf8(bytes: Uint8Array): string {
   return decodeURIComponent(escape(out));
 }
 
-async function extractEPUB(sourceFile: File, bookID: string): Promise<Directory> {
-  const bytes = await sourceFile.bytes();
+function extractEPUB(bytes: Uint8Array, bookID: string): Directory {
   let entries: Record<string, Uint8Array>;
   try {
     entries = unzipSync(bytes);
@@ -70,15 +61,14 @@ export async function importDocument(
   const source = new File(uri);
   if (!source.exists) throw new Error('The chosen file could not be read.');
   const kind = kindFor(displayName, mimeType);
-  const size = source.size ?? 0;
+  const bytes = await source.bytes();
   const baseName = displayName.replace(/\.(epub|pdf)$/i, '');
   const now = new Date().toISOString();
 
   if (kind === 'pdf') {
-    const id = `pdf-${hashString(`${displayName}:${size}`)}`;
+    const id = await documentID(kind, bytes);
     const destination = new File(booksDirectory, `${sanitizedFileName(id)}.pdf`);
-    if (destination.exists) destination.delete();
-    source.copy(destination);
+    if (!destination.exists) await source.copy(destination);
     return {
       record: {
         id,
@@ -95,8 +85,8 @@ export async function importDocument(
   }
 
   // Extract under a provisional id, parse, then rename to the stable id.
-  const provisionalID = `tmp-${hashString(`${displayName}:${size}:${Date.now()}`)}`;
-  const extracted = await extractEPUB(source, provisionalID);
+  const provisionalID = `tmp-${randomUUID()}`;
+  const extracted = extractEPUB(bytes, provisionalID);
   let publication;
   try {
     publication = parsePublication(directorySource(extracted));
@@ -104,23 +94,25 @@ export async function importDocument(
     extracted.delete();
     throw error;
   }
-  // The record id doubles as a route parameter and a file name, so it must be
-  // path-safe. Publication identifiers are often URLs or URNs.
-  const rawID = publication.identifier?.trim() || `epub-${hashString(`${displayName}:${size}`)}`;
-  const safeID = sanitizedFileName(rawID);
+  // Hash the complete identifier (or document bytes), never a truncated slug.
+  const safeID = await documentID(kind, bytes, publication.identifier);
   const id = safeID;
 
   // A book that is already in the library keeps its extraction and copy, so
   // re-importing (or re-adding the samples) never disturbs an open reader.
   const finalDirectory = new Directory(extractedDirectory, safeID);
+  if (!finalDirectory.uri.startsWith(extractedDirectory.uri.replace(/\/$/, '') + '/')) {
+    extracted.delete();
+    throw new Error('The book storage directory is outside the library extraction directory.');
+  }
   const destination = new File(booksDirectory, `${safeID}.epub`);
   if (finalDirectory.exists && destination.exists) {
     extracted.delete();
   } else {
     if (finalDirectory.exists) finalDirectory.delete();
-    extracted.move(finalDirectory);
+    await extracted.move(finalDirectory);
     if (destination.exists) destination.delete();
-    source.copy(destination);
+    await source.copy(destination);
   }
 
   let coverRelativePath: string | undefined;
@@ -129,9 +121,7 @@ export async function importDocument(
       const coverSource = new File(finalDirectory, ...publication.coverPath.split('/'));
       const extension = extensionOf(publication.coverPath) || 'jpg';
       const coverTarget = new File(coversDirectory, `${safeID}.${extension}`);
-      // A File's `exists` can read stale right after a copy, so a copy that
-      // did not throw is taken as success.
-      if (!coverTarget.exists) coverSource.copy(coverTarget);
+      if (!coverTarget.exists) await coverSource.copy(coverTarget);
       coverRelativePath = `Covers/${safeID}.${extension}`;
     } catch (error) {
       console.warn('Cover copy failed for', safeID, publication.coverPath, error);

@@ -18,6 +18,8 @@ export default function NoteSheet() {
   const book = useBook(bookId);
   const annotation = book?.annotations.find((item) => item.id === annotationId);
   const [draft, setDraft] = useState(annotation?.note ?? '');
+  const draftRef = useRef(draft);
+  const dirtyRef = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const colors: HighlightColor[] = [...FILL_COLORS, 'underline'];
 
@@ -29,16 +31,22 @@ export default function NoteSheet() {
     [bookId, annotationId],
   );
 
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, []);
+  const flushDraft = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    if (!dirtyRef.current) return;
+    dirtyRef.current = false;
+    commit(draftRef.current);
+  }, [commit]);
+
+  useEffect(() => flushDraft, [flushDraft]);
 
   const onChange = (value: string) => {
     setDraft(value);
+    draftRef.current = value;
+    dirtyRef.current = true;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => commit(value), 400);
+    saveTimer.current = setTimeout(flushDraft, 400);
   };
 
   const remove = () => {
@@ -49,6 +57,8 @@ export default function NoteSheet() {
         text: 'Delete',
         style: 'destructive',
         onPress: () => {
+          dirtyRef.current = false;
+          if (saveTimer.current) clearTimeout(saveTimer.current);
           deleteAnnotation(bookId, annotationId);
           router.back();
         },
@@ -75,8 +85,7 @@ export default function NoteSheet() {
             variant="done"
             accessibilityLabel="Done"
             onPress={() => {
-              if (saveTimer.current) clearTimeout(saveTimer.current);
-              commit(draft);
+              flushDraft();
               router.back();
             }}
           />

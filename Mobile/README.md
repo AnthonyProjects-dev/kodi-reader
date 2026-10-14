@@ -41,6 +41,11 @@ src/components/          GlassSurface, HighlightPalette, BookRow, AppearanceForm
 Data lives under the app's Documents directory in `Kodi/`:
 `library.json`, `Books/`, `Extracted/`, `Covers/`, `runtime/`.
 
+Book IDs hash the complete publication identifier, or the file contents when an
+identifier is absent. Reader web views can access only their book's extraction
+directory, including a local copy of the trusted reader runtime. A content
+security policy disables publisher scripts, frames and network requests.
+
 ## How the reader stays fast
 
 - The reader is a persistent layer above the navigation stack
@@ -78,3 +83,19 @@ translucent fallback with the same geometry.
 ## Not yet ported
 
 Ask AI, cloud sync, Excalidraw drawings, and PDF highlights.
+
+## Checks
+
+Use Node.js 24, then run `npm ci`, `npm test`, `npx tsc --noEmit`,
+`npx expo lint --no-cache`, and `npx expo export --platform ios`.
+GitHub Actions runs these checks for mobile changes. The regression tests use
+asynchronous native-service adapters; they do not replace an iOS simulator test.
+
+On macOS, an optional native WebKit smoke test checks protected XHTML loading,
+pagination, fragment navigation, position restore and highlight painting:
+
+```sh
+node tests/webkit-fixture.cjs /tmp/kodi-webkit-smoke
+swiftc tests/webkit-smoke.swift -o /tmp/kodi-webkit-smoke-test
+/tmp/kodi-webkit-smoke-test /tmp/kodi-webkit-smoke
+```

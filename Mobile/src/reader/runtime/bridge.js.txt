@@ -8,6 +8,7 @@
 
   function post(message) {
     try {
+      message.documentToken = window.__kodiBoot && window.__kodiBoot.documentToken;
       window.ReactNativeWebView.postMessage(JSON.stringify(message));
     } catch (error) {
       /* not hosted */
