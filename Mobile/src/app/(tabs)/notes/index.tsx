@@ -1,4 +1,4 @@
-import { Stack, useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
@@ -6,6 +6,7 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Typography } from '@/components/Typography';
 import { usePalette } from '@/hooks/use-palette';
 import { shareNotes } from '@/lib/export';
+import { openReader } from '@/reader/openReader';
 import { useRecents } from '@/lib/store';
 import { Radius, Spacing } from '@/lib/theme';
 import { HIGHLIGHT_SWATCH, type Annotation, type BookRecord } from '@/lib/types';
@@ -16,17 +17,11 @@ function formatDate(iso: string) {
 
 export default function NotesScreen() {
   const palette = usePalette();
-  const router = useRouter();
   const books = useRecents();
   const annotated = useMemo(() => books.filter((book) => book.annotations.length > 0), [books]);
   const total = useMemo(() => annotated.reduce((sum, book) => sum + book.annotations.length, 0), [annotated]);
 
-  const open = useCallback(
-    (book: BookRecord, annotation: Annotation) => {
-      router.push({ pathname: '/reader/[id]', params: { id: book.id, annotation: annotation.id } });
-    },
-    [router],
-  );
+  const open = useCallback((book: BookRecord, annotation: Annotation) => openReader(book.id, annotation.id), []);
 
   return (
     <>

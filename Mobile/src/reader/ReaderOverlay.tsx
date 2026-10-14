@@ -1,13 +1,16 @@
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
-import Animated, { FadeIn, FadeInDown, FadeInUp, FadeOut } from 'react-native-reanimated';
+import { ActivityIndicator, Alert, BackHandler, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
+import Animated, { Easing, FadeIn, FadeInDown, FadeInUp, FadeOut, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 
+import { closeReader, useReaderRequest } from './openReader';
+import { ReaderWebView, type ReaderHandle, type ReaderMeta, type ReaderSelection } from './ReaderWebView';
+import { setReaderSession, updateReaderSession } from './session';
 import { GlassGroup, GlassSurface } from '@/components/GlassSurface';
 import { HighlightPalette } from '@/components/HighlightPalette';
 import { Typography } from '@/components/Typography';
@@ -17,12 +20,11 @@ import { directoryURL, fileAt, rootDirectory } from '@/lib/files';
 import { addAnnotation, deleteAnnotation, makeID, savePosition, touchBook, updateAnnotation, useBook, useSettings } from '@/lib/store';
 import { Fonts, Spacing } from '@/lib/theme';
 import type { Annotation, HighlightColor, Locator, Publication } from '@/lib/types';
-import { ReaderWebView, type ReaderHandle, type ReaderMeta, type ReaderSelection } from '@/reader/ReaderWebView';
-import { setReaderSession, updateReaderSession } from '@/reader/session';
 
 const PALETTE_WIDTH = 330;
 const PALETTE_WIDTH_WITH_DELETE = 372;
 const PALETTE_HEIGHT = 46;
+const SLIDE_MS = 280;
 
 function ChromeButton({ icon, label, onPress, color, size = 44 }: { icon: string; label: string; onPress: () => void; color: string; size?: number }) {
   return (
@@ -34,10 +36,15 @@ function ChromeButton({ icon, label, onPress, color, size = 44 }: { icon: string
   );
 }
 
-export default function ReaderScreen() {
+/**
+ * The reader, as a layer above the navigation stack. It stays mounted for the
+ * whole app session so its web views never have to cold-start: opening a book
+ * slides this layer up and navigates the already-running web view.
+ */
+export function ReaderOverlay() {
   const router = useRouter();
-  const { id, annotation: annotationParam } = useLocalSearchParams<{ id: string; annotation?: string }>();
-  const book = useBook(id);
+  const request = useReaderRequest();
+  const book = useBook(request.bookID ?? undefined);
   const settings = useSettings();
   const palette = usePalette();
   const insets = useSafeAreaInsets();
@@ -46,11 +53,23 @@ export default function ReaderScreen() {
   const { width, height } = useWindowDimensions();
   const readerRef = useRef<ReaderHandle>(null);
 
+  const visible = request.visible && Boolean(book);
   const [chromeVisible, setChromeVisible] = useState(true);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [meta, setMeta] = useState<ReaderMeta | null>(null);
   const [selection, setSelection] = useState<ReaderSelection | null>(null);
   const [activeHighlight, setActiveHighlight] = useState<{ id: string; rect: ReaderSelection['rect'] } | null>(null);
+
+  // Each open starts with fresh chrome and no stale selection; a different book also drops the old page info.
+  const [seen, setSeen] = useState({ nonce: request.nonce, bookID: request.bookID });
+  if (seen.nonce !== request.nonce) {
+    setSeen({ nonce: request.nonce, bookID: request.bookID });
+    setChromeVisible(true);
+    setSelection(null);
+    setActiveHighlight(null);
+    if (seen.bookID !== request.bookID) setMeta(null);
+  }
+
   const { publication, publicationError } = useMemo<{ publication: Publication | null; publicationError: string | null }>(() => {
     if (!book || book.kind !== 'epub') return { publication: null, publicationError: null };
     try {
@@ -60,28 +79,57 @@ export default function ReaderScreen() {
     }
   }, [book]);
 
+  // Where a newly loaded book opens: the requested highlight, else the saved position.
   const initialLocator = useMemo<Locator | undefined>(() => {
     if (!book) return undefined;
-    if (annotationParam) {
-      const target = book.annotations.find((item) => item.id === annotationParam);
-      if (target) return target.locator;
-    }
-    return book.position;
-    // Only the first render decides where to open; later position saves must not re-run this.
+    const target = request.annotationID ? book.annotations.find((item) => item.id === request.annotationID) : undefined;
+    return target?.locator ?? book.position;
+    // Only a new book decides where to open; later position saves must not re-run this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book?.id, annotationParam]);
+  }, [book?.id]);
+
+  // Slide in and out. The layer stays mounted; only its position changes.
+  const offset = useSharedValue(height);
+  useEffect(() => {
+    offset.value = withTiming(visible ? 0 : height, { duration: SLIDE_MS, easing: visible ? Easing.out(Easing.cubic) : Easing.in(Easing.cubic) });
+  }, [visible, height, offset]);
+  const slideStyle = useAnimatedStyle(() => ({ transform: [{ translateY: offset.value }] }));
+
+  // Each open marks the book recent; reopening the loaded book jumps to a requested highlight.
+  const loadedBookRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!request.visible || !request.bookID) return;
+    touchBook(request.bookID);
+    const sameBook = loadedBookRef.current === request.bookID;
+    loadedBookRef.current = request.bookID;
+    if (!sameBook) return;
+    const target = request.annotationID ? book?.annotations.find((item) => item.id === request.annotationID) : undefined;
+    if (target) readerRef.current?.goToLocator(target.locator);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request.nonce]);
+
+  // A deleted book closes the reader.
+  useEffect(() => {
+    if (request.visible && request.bookID && !book) closeReader();
+  }, [request.visible, request.bookID, book]);
 
   useEffect(() => {
-    if (id) touchBook(id);
-  }, [id]);
+    if (!visible) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      closeReader();
+      return true;
+    });
+    return () => subscription.remove();
+  }, [visible]);
 
-  // Expose navigation to the contents sheet.
+  // Expose navigation to the contents sheet while a book is on screen.
   useEffect(() => {
-    if (!book) return;
+    if (!visible || !book) return;
     setReaderSession({
       bookID: book.id,
       publication,
-      spineIndex: initialLocator?.spineIndex ?? 0,
+      spineIndex: meta?.spineIndex ?? initialLocator?.spineIndex ?? 0,
+      chapterTitle: meta?.chapterTitle,
       goToTOC: (path, fragment) => readerRef.current?.goToPath(path, fragment),
       goToLocator: (locator) => readerRef.current?.goToLocator(locator),
       nextChapter: () => readerRef.current?.nextChapter(),
@@ -89,17 +137,15 @@ export default function ReaderScreen() {
     });
     return () => setReaderSession(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book?.id, publication]);
+  }, [visible, book?.id, publication]);
 
-  const onMeta = useCallback(
-    (next: ReaderMeta, locator: Locator | null) => {
-      setMeta(next);
-      setActiveHighlight(null);
-      updateReaderSession({ spineIndex: next.spineIndex, chapterTitle: next.chapterTitle });
-      if (locator && id) savePosition(id, locator, next.progress);
-    },
-    [id],
-  );
+  const onMeta = useCallback((next: ReaderMeta, locator: Locator | null) => {
+    setMeta(next);
+    setActiveHighlight(null);
+    updateReaderSession({ spineIndex: next.spineIndex, chapterTitle: next.chapterTitle });
+    const bookID = loadedBookRef.current;
+    if (locator && bookID) savePosition(bookID, locator, next.progress);
+  }, []);
 
   const onSelection = useCallback((next: ReaderSelection | null) => {
     setSelection(next);
@@ -119,7 +165,7 @@ export default function ReaderScreen() {
       setActiveHighlight(null);
       return;
     }
-    setChromeVisible((visible) => !visible);
+    setChromeVisible((shown) => !shown);
   }, [selection, activeHighlight]);
 
   const onError = useCallback((message: string) => {
@@ -150,18 +196,6 @@ export default function ReaderScreen() {
     [book, selection, meta?.chapterTitle, router],
   );
 
-  const openSheet = useCallback(
-    (href: '/reader/contents' | '/reader/typography') => {
-      if (__DEV__) console.log('[nav] push', href);
-      try {
-        router.push(href);
-      } catch (error) {
-        console.warn('[nav] push failed', error);
-      }
-    },
-    [router],
-  );
-
   const copyText = useCallback(async (text: string) => {
     await Clipboard.setStringAsync(text);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
@@ -179,68 +213,59 @@ export default function ReaderScreen() {
     [width, height, insets.top, insets.bottom],
   );
 
-  if (!book) {
-    return (
-      <View style={[styles.center, { backgroundColor: palette.page }]}>
-        <Typography variant="body" tone="muted">
-          This book is no longer in your library.
-        </Typography>
-        <Pressable onPress={() => router.back()} style={styles.linkButton}>
-          <Typography variant="body" tone="accent">
-            Back to Library
-          </Typography>
-        </Pressable>
-      </View>
-    );
-  }
-
-  const percent = Math.round((meta?.progress ?? book.progress) * 100);
+  const percent = Math.round((meta?.progress ?? book?.progress ?? 0) * 100);
   const chromeColor = palette.ink;
+  const showUI = visible && book;
 
   return (
-    <View style={[styles.screen, { backgroundColor: palette.page }]}>
-      <Stack.Screen options={{ headerShown: false }} />
+    <Animated.View
+      style={[StyleSheet.absoluteFill, styles.layer, { backgroundColor: palette.page }, slideStyle]}
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+      accessibilityViewIsModal={visible}>
+      <ReaderWebView
+        ref={readerRef}
+        book={book?.kind === 'epub' ? book : undefined}
+        publication={publication ?? undefined}
+        settings={settings}
+        palette={palette}
+        annotations={book?.annotations ?? EMPTY}
+        insets={readerInsets}
+        initialLocator={initialLocator}
+        onMeta={onMeta}
+        onSelection={onSelection}
+        onHighlightTapped={onHighlightTapped}
+        onTap={onTap}
+        onLoadingChange={setLoading}
+        onError={onError}
+      />
 
-      {book.kind === 'pdf' ? (
+      {showUI && book.kind === 'pdf' ? (
         <WebView
           source={{ uri: fileAt(book.importedRelativePath).uri }}
           allowingReadAccessToURL={directoryURL(rootDirectory) + '/'}
           allowFileAccess
           originWhitelist={['*']}
-          style={[styles.pdf, { backgroundColor: palette.page }]}
+          style={[StyleSheet.absoluteFill, { backgroundColor: palette.page }]}
+          containerStyle={StyleSheet.absoluteFill}
           contentInsetAdjustmentBehavior="never"
-          onLoadEnd={() => setLoading(false)}
           onError={(event) => Alert.alert('Could not open', event.nativeEvent.description)}
         />
-      ) : publication ? (
-        <ReaderWebView
-          ref={readerRef}
-          book={book}
-          publication={publication}
-          settings={settings}
-          palette={palette}
-          annotations={book.annotations}
-          insets={readerInsets}
-          initialLocator={initialLocator}
-          onMeta={onMeta}
-          onSelection={onSelection}
-          onHighlightTapped={onHighlightTapped}
-          onTap={onTap}
-          onLoadingChange={setLoading}
-          onError={onError}
-        />
-      ) : (
-        <View style={styles.center}>
+      ) : null}
+
+      {showUI && book.kind === 'epub' && !publication ? (
+        <View style={[StyleSheet.absoluteFill, styles.center, { backgroundColor: palette.page }]}>
           <Typography variant="body" tone="muted" style={styles.errorText}>
             {publicationError ?? 'This document could not be opened.'}
           </Typography>
         </View>
-      )}
+      ) : null}
 
       {/* Top chrome */}
-      {chromeVisible ? (
+      {showUI && chromeVisible ? (
         <Animated.View entering={FadeInDown.duration(180)} exiting={FadeOut.duration(140)} style={[styles.topBar, { top: insets.top + 8 }]} pointerEvents="box-none">
-          <ChromeButton icon="chevron.left" label="Back to Library" color={chromeColor} onPress={() => router.back()} />
+          <ChromeButton icon="chevron.left" label="Back to Library" color={chromeColor} onPress={closeReader} />
           <GlassSurface style={styles.titlePill}>
             <Typography variant="caption" numberOfLines={1} style={[styles.titleText, { color: chromeColor }]}>
               {book.title}
@@ -253,15 +278,15 @@ export default function ReaderScreen() {
           </GlassSurface>
           {book.kind === 'epub' ? (
             <GlassGroup style={styles.buttonGroup} spacing={10}>
-              <ChromeButton icon="list.bullet" label="Contents" color={chromeColor} onPress={() => openSheet('/reader/contents')} />
-              <ChromeButton icon="textformat.size" label="Appearance" color={chromeColor} onPress={() => openSheet('/reader/typography')} />
+              <ChromeButton icon="list.bullet" label="Contents" color={chromeColor} onPress={() => router.push('/reader/contents')} />
+              <ChromeButton icon="textformat.size" label="Appearance" color={chromeColor} onPress={() => router.push('/reader/typography')} />
             </GlassGroup>
           ) : null}
         </Animated.View>
       ) : null}
 
       {/* Bottom chrome */}
-      {chromeVisible && book.kind === 'epub' ? (
+      {showUI && chromeVisible && book.kind === 'epub' ? (
         <Animated.View entering={FadeInUp.duration(180)} exiting={FadeOut.duration(140)} style={[styles.bottomBar, { bottom: insets.bottom + 10 }]} pointerEvents="box-none">
           <GlassSurface style={styles.progressPill}>
             <View style={styles.progressRow}>
@@ -270,12 +295,7 @@ export default function ReaderScreen() {
               </Pressable>
               <View style={styles.progressCenter}>
                 <View style={[styles.track, { backgroundColor: palette.border }]}>
-                  <View
-                    style={[
-                      styles.trackFill,
-                      { backgroundColor: palette.accent, width: `${Math.round((meta?.progress ?? book.progress) * 100)}%` },
-                    ]}
-                  />
+                  <View style={[styles.trackFill, { backgroundColor: palette.accent, width: `${percent}%` }]} />
                 </View>
                 <Typography variant="caption" tone="muted" numberOfLines={1} style={styles.progressText}>
                   {meta ? `Page ${meta.page + 1} of ${meta.pageCount}` : 'Opening…'}
@@ -292,7 +312,7 @@ export default function ReaderScreen() {
       ) : null}
 
       {/* Selection palette */}
-      {selection ? (
+      {showUI && selection ? (
         <Animated.View entering={FadeIn.duration(120)} exiting={FadeOut.duration(100)} style={[styles.palette, palettePosition(selection.rect)]}>
           <HighlightPalette
             onPick={(color) => addHighlight(color, false)}
@@ -305,7 +325,7 @@ export default function ReaderScreen() {
         </Animated.View>
       ) : null}
 
-      {activeHighlight && activeAnnotation ? (
+      {showUI && activeHighlight && activeAnnotation ? (
         <Animated.View entering={FadeIn.duration(120)} exiting={FadeOut.duration(100)} style={[styles.palette, palettePosition(activeHighlight.rect, PALETTE_WIDTH_WITH_DELETE)]}>
           <HighlightPalette
             currentColor={activeAnnotation.color}
@@ -330,23 +350,23 @@ export default function ReaderScreen() {
         </Animated.View>
       ) : null}
 
-      {loading ? (
+      {showUI && loading ? (
         <View style={styles.loading} pointerEvents="none">
           <GlassSurface style={styles.loadingPill}>
             <ActivityIndicator color={palette.accent} />
           </GlassSurface>
         </View>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 
+const EMPTY: Annotation[] = [];
+
 const styles = StyleSheet.create({
-  screen: { flex: 1 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.md, padding: Spacing.lg },
+  layer: { zIndex: 10 },
+  center: { alignItems: 'center', justifyContent: 'center', gap: Spacing.md, padding: Spacing.lg },
   errorText: { textAlign: 'center' },
-  linkButton: { paddingVertical: Spacing.sm },
-  pdf: { flex: 1 },
   topBar: {
     position: 'absolute',
     left: Spacing.md,

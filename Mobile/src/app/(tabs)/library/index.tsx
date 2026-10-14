@@ -10,6 +10,7 @@ import { Typography } from '@/components/Typography';
 import { usePalette } from '@/hooks/use-palette';
 import { importDocument, removeDocumentFiles } from '@/lib/epub/import';
 import { forgetPublication } from '@/lib/epub/book';
+import { forgetReaderBook, openReader } from '@/reader/openReader';
 import { addSampleBooks } from '@/lib/samples';
 import { getState, removeBook, renameBook, upsertBook, useRecents } from '@/lib/store';
 import { Spacing } from '@/lib/theme';
@@ -22,12 +23,7 @@ export default function LibraryScreen() {
   const [busy, setBusy] = useState(false);
   const { addSamples: addSamplesParam } = useLocalSearchParams<{ addSamples?: string }>();
 
-  const openBook = useCallback(
-    (book: BookRecord) => {
-      router.push({ pathname: '/reader/[id]', params: { id: book.id } });
-    },
-    [router],
-  );
+  const openBook = useCallback((book: BookRecord) => openReader(book.id), []);
 
   const pickDocument = useCallback(async () => {
     try {
@@ -82,6 +78,7 @@ export default function LibraryScreen() {
           text: 'Remove Book and Notes',
           style: 'destructive',
           onPress: () => {
+            forgetReaderBook(book.id);
             removeBook(book.id);
             forgetPublication(book.id);
             removeDocumentFiles(book);

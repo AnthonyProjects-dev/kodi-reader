@@ -6,6 +6,7 @@ import { Appearance, AppState } from 'react-native';
 
 import { usePalette } from '@/hooks/use-palette';
 import { flush, loadLibrary, useSettings } from '@/lib/store';
+import { ReaderOverlay } from '@/reader/ReaderOverlay';
 import { ensureRuntimeInstalled } from '@/reader/runtime';
 
 SplashScreen.preventAutoHideAsync().catch(() => undefined);
@@ -54,7 +55,6 @@ export default function RootLayout() {
       <StatusBar style={palette.isDark ? 'light' : 'dark'} />
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: palette.page } }}>
         <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="reader/[id]" options={{ animation: 'fade', gestureEnabled: false, autoHideHomeIndicator: true }} />
         <Stack.Screen
           name="web/index"
           options={{
@@ -101,6 +101,8 @@ export default function RootLayout() {
           }}
         />
       </Stack>
+      {/* The reader lives above the stack for the whole session, so its web views stay warm. */}
+      <ReaderOverlay />
     </ThemeProvider>
   );
 }

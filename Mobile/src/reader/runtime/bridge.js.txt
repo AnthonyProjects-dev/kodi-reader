@@ -90,5 +90,32 @@
 
   // Long-press selection: iOS fires selectionchange as handles move. reader.js
   // reports those; nothing more is needed here.
-  post({ type: "bridgeReady" });
+  /*
+   * Self-boot: the app writes window.__kodiBoot into each chapter's <head>, so
+   * the page lays itself out, restores its position and paints highlights on
+   * DOMContentLoaded without waiting on round trips through the app.
+   */
+  function boot() {
+    var config = window.__kodiBoot;
+    var reader = window.__reader;
+    if (!config || !reader) return;
+    reader.start(config.options);
+    var target = config.target || {};
+    if (target.goToEnd) {
+      reader.goToEnd();
+    } else if (target.fragment) {
+      reader.goToFragment(target.fragment, false);
+    } else if (target.position && target.position.elementPath && target.position.elementPath.length) {
+      reader.goToPosition(target.position, false);
+    }
+    if (config.highlights && config.highlights.length) reader.setHighlights(config.highlights);
+    reader.notifyState();
+    post({ type: "booted" });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
 })();

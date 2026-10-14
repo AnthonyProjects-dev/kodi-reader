@@ -12,6 +12,7 @@ import { importDocument } from '@/lib/epub/import';
 import { getState, upsertBook } from '@/lib/store';
 import { Fonts, Spacing } from '@/lib/theme';
 import { buildArticleEPUB, normalizedWebURL, type ArticleContent } from '@/lib/web/article';
+import { openReader } from '@/reader/openReader';
 import { runtimeText } from '@/reader/runtime';
 
 const START_PAGE = 'https://www.gutenberg.org/';
@@ -110,7 +111,8 @@ export default function WebScreen() {
       };
       upsertBook(saved);
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.replace({ pathname: '/reader/[id]', params: { id: saved.id } });
+      router.back();
+      openReader(saved.id);
     } catch (error) {
       Alert.alert('Could not save', error instanceof Error ? error.message : String(error));
     } finally {

@@ -37,8 +37,9 @@ export type ReaderHandle = {
 };
 
 type Props = {
-  book: BookRecord;
-  publication: Publication;
+  /** Without a book the reader idles on a blank page, which keeps WebKit warm. */
+  book?: BookRecord;
+  publication?: Publication;
   settings: ReaderSettings;
   palette: Palette;
   annotations: Annotation[];
@@ -52,155 +53,292 @@ type Props = {
   onError: (message: string) => void;
 };
 
-type PendingTarget = { position?: TextPosition; fragment?: string; goToEnd?: boolean };
+type Target = { position?: TextPosition; fragment?: string; goToEnd?: boolean };
 
-function escapeForScript(value: unknown): string {
-  // JSON inside a <script> injection must not terminate the script early.
-  return JSON.stringify(value).replace(/<\/script/gi, '<\\/script');
+/** One of the two web views: the chapter on screen, or the next one preloading behind it. */
+type Slot = {
+  spineIndex: number;
+  ready: boolean;
+  /** Runtime options the chapter booted with, to detect settings changed while it loaded. */
+  bootKey: string;
+  /** Annotations array the chapter booted with, to detect highlights changed while it loaded. */
+  annotations: Annotation[] | null;
+  generation: number;
+};
+
+type SlotIndex = 0 | 1;
+type Source = { uri: string } | { html: string } | null;
+const BLANK: Source = { html: '<!doctype html><html><head><title>Kodi</title></head><body></body></html>' };
+const other = (slot: SlotIndex): SlotIndex => (slot === 0 ? 1 : 0);
+
+/** Wait this long after a chapter appears before preloading the next one, so they never compete. */
+const PRELOAD_DELAY_MS = 400;
+
+// Flip on to log per-stage chapter load timings in development.
+const DEBUG_TIMING = false;
+let loadStartedAt = 0;
+function mark(stage: string) {
+  if (!__DEV__ || !DEBUG_TIMING) return;
+  if (stage.startsWith('load')) loadStartedAt = Date.now();
+  console.log(`[timing] ${stage} +${Date.now() - loadStartedAt}ms`);
+}
+
+/** JSON that is safe inside a <script> element of an XHTML document. */
+function scriptJSON(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
 }
 
 /**
- * Hosts one spine document at a time inside a WKWebView, with the Kodi reader
- * runtime injected into the document head. All page-turn, selection, and
- * highlight logic lives in reader.js; this component only relays messages.
+ * Hosts the book in WKWebViews running the Kodi reader runtime. All page-turn,
+ * selection, and highlight logic lives in reader.js; this component relays
+ * messages and decides which chapter loads where.
+ *
+ * Speed comes from three things:
+ * - Each chapter file carries its own boot data (options, position,
+ *   highlights), so it lays itself out without round trips to the JS thread.
+ * - A second web view preloads the next chapter behind the visible one, so
+ *   reading past a chapter end is an instant swap instead of a page load.
+ * - Chapters always navigate to a fresh file name instead of reloading.
  */
 export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebView(
   { book, publication, settings, palette, annotations, insets, initialLocator, onMeta, onSelection, onHighlightTapped, onTap, onLoadingChange, onError },
   ref,
 ) {
   const { width } = useWindowDimensions();
-  const webViewRef = useRef<WebView>(null);
-  const [source, setSource] = useState<{ uri: string } | null>(null);
-  const sourceRef = useRef<string | null>(null);
-  const spineIndexRef = useRef(initialLocator?.spineIndex ?? 0);
-  const readyRef = useRef(false);
-  const pendingRef = useRef<PendingTarget>({});
-  const pageRef = useRef({ page: 0, pageCount: 1 });
+  const webViewRefs = [useRef<WebView>(null), useRef<WebView>(null)] as const;
+  const [sources, setSources] = useState<[Source, Source]>([BLANK, null]);
+  const [active, setActive] = useState<SlotIndex>(0);
+  const activeRef = useRef<SlotIndex>(0);
+  const slotsRef = useRef<[Slot, Slot]>([
+    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0 },
+    { spineIndex: -1, ready: false, bootKey: '', annotations: null, generation: 0 },
+  ]);
+  const preloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const configureTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const extractedDirectory = useMemo(() => directoryAt(book.extractedRelativePath ?? ''), [book.extractedRelativePath]);
+  const extractedDirectory = useMemo(() => directoryAt(book?.extractedRelativePath ?? ''), [book?.extractedRelativePath]);
+  const readingOrder = useMemo(() => publication?.readingOrder ?? [], [publication]);
+  const weights = useMemo(() => publication?.weights ?? [], [publication]);
   const readAccessURL = useMemo(() => directoryURL(rootDirectory) + '/', []);
-
-  const totalWeight = useMemo(() => publication.weights.reduce((sum, weight) => sum + weight, 0), [publication.weights]);
+  const totalWeight = useMemo(() => weights.reduce((sum, weight) => sum + weight, 0), [weights]);
 
   const overallProgress = useCallback(
     (spineIndex: number, withinChapter: number) => {
       if (totalWeight <= 0) return 0;
       let before = 0;
-      for (let i = 0; i < spineIndex; i += 1) before += publication.weights[i] ?? 0;
-      const current = publication.weights[spineIndex] ?? 0;
+      for (let i = 0; i < spineIndex; i += 1) before += weights[i] ?? 0;
+      const current = weights[spineIndex] ?? 0;
       return Math.min(1, Math.max(0, (before + current * withinChapter) / totalWeight));
     },
-    [publication.weights, totalWeight],
+    [weights, totalWeight],
   );
 
-  const evaluate = useCallback((script: string) => {
-    webViewRef.current?.injectJavaScript(`${script}; true;`);
-  }, []);
+  const evaluateIn = useCallback(
+    (slot: SlotIndex, script: string) => {
+      webViewRefs[slot].current?.injectJavaScript(`${script}; true;`);
+    },
+    // The refs are stable for the component's lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const evaluate = useCallback((script: string) => evaluateIn(activeRef.current, script), [evaluateIn]);
 
-  const currentOptions = useCallback(
-    () => runtimeOptions(settings, palette, width, insets),
-    [settings, palette, width, insets],
+  const currentOptions = useCallback(() => runtimeOptions(settings, palette, width, insets), [settings, palette, width, insets]);
+
+  const highlightsFor = useCallback(
+    (spineIndex: number) => annotations.filter((annotation) => annotation.locator.spineIndex === spineIndex).map(highlightPayload),
+    [annotations],
   );
 
-  const pushHighlights = useCallback(() => {
-    const spineIndex = spineIndexRef.current;
-    const payloads = annotations
-      .filter((annotation) => annotation.locator.spineIndex === spineIndex)
-      .map(highlightPayload);
-    evaluate(`window.__reader && __reader.setHighlights(${escapeForScript(payloads)})`);
-  }, [annotations, evaluate]);
+  const pushHighlights = useCallback(
+    (slot: SlotIndex) => {
+      const state = slotsRef.current[slot];
+      if (!state.ready) return;
+      state.annotations = annotations;
+      evaluateIn(slot, `window.__reader && __reader.setHighlights(${scriptJSON(highlightsFor(state.spineIndex))})`);
+    },
+    [annotations, evaluateIn, highlightsFor],
+  );
 
-  /** Writes an injected copy of the chapter next to the original and loads it. */
+  /**
+   * Writes a copy of the chapter with the runtime and its boot data in <head>,
+   * then points the slot's web view at it.
+   */
+  const writeAndLoad = useCallback(
+    (slot: SlotIndex, index: number, target: Target) => {
+      const path = readingOrder[index].path;
+      const segments = path.split('/');
+      const fileName = segments.pop() ?? path;
+      let html = new File(extractedDirectory, ...segments, fileName).textSync();
+
+      const options = currentOptions();
+      const state = slotsRef.current[slot];
+      state.spineIndex = index;
+      state.ready = false;
+      state.bootKey = JSON.stringify(options);
+      state.annotations = annotations;
+      state.generation += 1;
+
+      const boot = { options: { ...options, spineIndex: index }, target, highlights: highlightsFor(index) };
+      const tags = [
+        '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>',
+        `<style id="kodi-boot">${inlineStyle(cssVariables(settings, palette, width, insets))}</style>`,
+        `<link rel="stylesheet" type="text/css" href="${runtimeURL('reader.css')}"/>`,
+        `<script>window.__kodiBoot = ${scriptJSON(boot)};</script>`,
+        `<script src="${runtimeURL('reader.js')}"></script>`,
+        `<script src="${runtimeURL('bridge.js')}"></script>`,
+      ].join('\n');
+
+      const headClose = html.search(/<\/head>/i);
+      if (headClose >= 0) {
+        html = `${html.slice(0, headClose)}${tags}\n${html.slice(headClose)}`;
+      } else {
+        const bodyOpen = html.search(/<body/i);
+        html = bodyOpen >= 0 ? `${html.slice(0, bodyOpen)}<head>${tags}</head>\n${html.slice(bodyOpen)}` : tags + html;
+      }
+
+      // Alternate between two names per slot so every load is a navigation to a
+      // new URL. Reloading the same file URL is far slower in WKWebView.
+      const extension = extensionOf(fileName) || 'xhtml';
+      const stem = fileName.replace(/\.[^.]+$/, '');
+      const injected = new File(extractedDirectory, ...segments, `${stem}.kodi-${slot}${state.generation % 2}.${extension}`);
+      if (injected.exists) injected.delete();
+      injected.write(html);
+
+      setSources((current) => {
+        const next: [Source, Source] = [...current];
+        next[slot] = { uri: injected.uri };
+        return next;
+      });
+    },
+    [readingOrder, extractedDirectory, currentOptions, annotations, highlightsFor, settings, palette, width, insets],
+  );
+
+  const preloadNext = useCallback(() => {
+    const visible = activeRef.current;
+    const hidden = other(visible);
+    const next = slotsRef.current[visible].spineIndex + 1;
+    if (next <= 0 || next >= readingOrder.length) return;
+    if (slotsRef.current[hidden].spineIndex === next) return;
+    try {
+      mark(`preload ${next}`);
+      writeAndLoad(hidden, next, {});
+    } catch {
+      slotsRef.current[hidden].spineIndex = -1;
+    }
+  }, [readingOrder.length, writeAndLoad]);
+
+  const schedulePreload = useCallback(() => {
+    if (preloadTimer.current) clearTimeout(preloadTimer.current);
+    preloadTimer.current = setTimeout(preloadNext, PRELOAD_DELAY_MS);
+  }, [preloadNext]);
+
+  /** Brings a chapter on screen in the visible web view. */
   const loadSpine = useCallback(
-    (index: number, target: PendingTarget = {}) => {
-      const order = publication.readingOrder;
-      if (index < 0 || index >= order.length) return;
-      readyRef.current = false;
-      pendingRef.current = target;
-      spineIndexRef.current = index;
+    (index: number, target: Target = {}) => {
+      if (index < 0 || index >= readingOrder.length) return;
+      mark(`load ${index}`);
       onSelection(null);
       onLoadingChange(true);
-
       try {
-        const path = order[index].path;
-        const segments = path.split('/');
-        const fileName = segments.pop() ?? path;
-        const original = new File(extractedDirectory, ...segments, fileName);
-        let html = original.textSync();
-
-        const variables = cssVariables(settings, palette, width, insets);
-        const tags = [
-          '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>',
-          `<style id="kodi-boot">${inlineStyle(variables)}</style>`,
-          `<link rel="stylesheet" type="text/css" href="${runtimeURL('reader.css')}"/>`,
-          `<script src="${runtimeURL('reader.js')}"></script>`,
-          `<script src="${runtimeURL('bridge.js')}"></script>`,
-        ].join('\n');
-
-        const headClose = html.search(/<\/head>/i);
-        if (headClose >= 0) {
-          html = `${html.slice(0, headClose)}${tags}\n${html.slice(headClose)}`;
-        } else {
-          const bodyOpen = html.search(/<body/i);
-          html = bodyOpen >= 0 ? `${html.slice(0, bodyOpen)}<head>${tags}</head>\n${html.slice(bodyOpen)}` : tags + html;
-        }
-
-        const extension = extensionOf(fileName) || 'xhtml';
-        const stem = fileName.replace(/\.[^.]+$/, '');
-        const injected = new File(extractedDirectory, ...segments, `${stem}.kodi.${extension}`);
-        if (injected.exists) injected.delete();
-        injected.write(html);
-        if (sourceRef.current === injected.uri) {
-          // Same document again (settings-only rewrite or a dev reload): a new
-          // source object would not trigger a load, so reload explicitly.
-          webViewRef.current?.reload();
-        } else {
-          sourceRef.current = injected.uri;
-          setSource({ uri: injected.uri });
-        }
+        writeAndLoad(activeRef.current, index, target);
       } catch (error) {
         onLoadingChange(false);
         onError(error instanceof Error ? error.message : String(error));
       }
     },
-    [publication.readingOrder, extractedDirectory, settings, palette, width, insets, onSelection, onLoadingChange, onError],
+    [readingOrder.length, onSelection, onLoadingChange, writeAndLoad, onError],
   );
 
-  // First load.
+  /** Swaps the preloaded web view to the front, then reuses the old one for the next preload. */
+  const promote = useCallback(
+    (slot: SlotIndex, target: Target = {}) => {
+      const previous = activeRef.current;
+      activeRef.current = slot;
+      setActive(slot);
+      onSelection(null);
+      evaluateIn(previous, 'window.__reader && __reader.clearSelection()');
+
+      const state = slotsRef.current[slot];
+      if (state.bootKey !== JSON.stringify(currentOptions())) {
+        evaluateIn(slot, `__reader.configure(${scriptJSON(currentOptions())}, true)`);
+        state.bootKey = JSON.stringify(currentOptions());
+      }
+      if (state.annotations !== annotations) pushHighlights(slot);
+      if (target.goToEnd) evaluateIn(slot, '__reader.goToEnd()');
+      else if (target.fragment) evaluateIn(slot, `__reader.goToFragment(${scriptJSON(target.fragment)}, false)`);
+      else if (target.position?.elementPath.length) evaluateIn(slot, `__reader.goToPosition(${scriptJSON(target.position)}, false)`);
+      // Reports the page so the chrome, progress, and saved position follow the swap.
+      evaluateIn(slot, '__reader.notifyState()');
+      onLoadingChange(false);
+      mark(`promoted ${state.spineIndex}`);
+      schedulePreload();
+    },
+    [onSelection, evaluateIn, currentOptions, annotations, pushHighlights, onLoadingChange, schedulePreload],
+  );
+
+  /** Shows a chapter, from the preloaded web view when it already holds it. */
+  const showChapter = useCallback(
+    (index: number, target: Target = {}) => {
+      const hidden = other(activeRef.current);
+      const preloaded = slotsRef.current[hidden];
+      if (preloaded.spineIndex === index && preloaded.ready) promote(hidden, target);
+      else loadSpine(index, target);
+    },
+    [promote, loadSpine],
+  );
+
+  // Each new book reuses the same web views: forget what they held, then load.
   useEffect(() => {
+    if (preloadTimer.current) clearTimeout(preloadTimer.current);
+    for (const state of slotsRef.current) {
+      state.spineIndex = -1;
+      state.ready = false;
+    }
+    if (!book || readingOrder.length === 0) return;
     const locator = initialLocator && initialLocator.kind !== 'pdf' ? initialLocator : undefined;
-    const index = Math.min(Math.max(locator?.spineIndex ?? 0, 0), publication.readingOrder.length - 1);
+    const index = Math.min(Math.max(locator?.spineIndex ?? 0, 0), readingOrder.length - 1);
     loadSpine(index, { position: locator?.start.elementPath.length ? locator.start : undefined });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [book.id]);
+  }, [book?.id, publication]);
 
-  // Settings or viewport changes reflow the page around the current position.
+  useEffect(
+    () => () => {
+      if (preloadTimer.current) clearTimeout(preloadTimer.current);
+      if (configureTimer.current) clearTimeout(configureTimer.current);
+    },
+    [],
+  );
+
+  // Settings or viewport changes reflow both chapters around their positions.
   const lastOptionsKey = useRef<string | null>(null);
   useEffect(() => {
     const key = JSON.stringify(currentOptions());
     if (lastOptionsKey.current === key) return;
     lastOptionsKey.current = key;
-    if (!readyRef.current) return;
     if (configureTimer.current) clearTimeout(configureTimer.current);
     configureTimer.current = setTimeout(() => {
-      evaluate(`window.__reader && __reader.configure(${escapeForScript(currentOptions())}, true)`);
+      const options = currentOptions();
+      for (const slot of [0, 1] as const) {
+        const state = slotsRef.current[slot];
+        if (!state.ready) continue;
+        state.bootKey = JSON.stringify(options);
+        evaluateIn(slot, `window.__reader && __reader.configure(${scriptJSON(options)}, true)`);
+      }
     }, 120);
-  }, [currentOptions, evaluate]);
+  }, [currentOptions, evaluateIn]);
 
   useEffect(() => {
-    if (readyRef.current) pushHighlights();
+    pushHighlights(0);
+    pushHighlights(1);
   }, [pushHighlights]);
 
   const reportMeta = useCallback(
     (page: number, pageCount: number, withinChapter: number, position: TextPosition | null) => {
-      const spineIndex = spineIndexRef.current;
+      const spineIndex = slotsRef.current[activeRef.current].spineIndex;
       const progress = overallProgress(spineIndex, withinChapter);
-      pageRef.current = { page, pageCount };
-      const locator: Locator | null = position
-        ? { kind: 'epub', spineIndex, start: position, totalProgression: progress }
-        : null;
-      onMeta({ spineIndex, page, pageCount, chapterTitle: chapterTitleFor(publication, spineIndex), progress }, locator);
+      const locator: Locator | null = position ? { kind: 'epub', spineIndex, start: position, totalProgression: progress } : null;
+      onMeta({ spineIndex, page, pageCount, chapterTitle: publication ? chapterTitleFor(publication, spineIndex) : undefined, progress }, locator);
     },
     [overallProgress, onMeta, publication],
   );
@@ -212,69 +350,70 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
         Linking.openURL(href).catch(() => undefined);
         return;
       }
+      if (!publication) return;
       const { path, fragment } = splitFragment(href);
+      const current = slotsRef.current[activeRef.current].spineIndex;
       if (!path) {
-        if (fragment) evaluate(`__reader.goToFragment(${escapeForScript(fragment)}, true)`);
+        if (fragment) evaluate(`__reader.goToFragment(${scriptJSON(fragment)}, true)`);
         return;
       }
-      const currentPath = publication.readingOrder[spineIndexRef.current]?.path ?? '';
-      const resolved = resolveHref(path, currentPath);
+      const resolved = resolveHref(path, readingOrder[current]?.path ?? '');
       const index = spineIndexForPath(publication, resolved);
       if (index < 0) return;
-      if (index === spineIndexRef.current) {
-        if (fragment) evaluate(`__reader.goToFragment(${escapeForScript(fragment)}, true)`);
+      if (index === current) {
+        if (fragment) evaluate(`__reader.goToFragment(${scriptJSON(fragment)}, true)`);
         return;
       }
-      loadSpine(index, { fragment });
+      showChapter(index, { fragment });
     },
-    [publication, evaluate, loadSpine],
+    [publication, readingOrder, evaluate, showChapter],
   );
 
-  const onMessage = useCallback(
-    (event: WebViewMessageEvent) => {
+  const handleMessage = useCallback(
+    (slot: SlotIndex, event: WebViewMessageEvent) => {
       let body: Record<string, any>;
       try {
         body = JSON.parse(event.nativeEvent.data);
       } catch {
         return;
       }
-      if (__DEV__ && body.type !== 'pageChanged') console.log('[reader]', body.type);
-      switch (body.type) {
-        case 'domReady': {
-          const options = { ...currentOptions(), spineIndex: spineIndexRef.current };
-          evaluate(`__reader.start(${escapeForScript(options)})`);
-          break;
+      const state = slotsRef.current[slot];
+      const isActive = slot === activeRef.current;
+
+      if (body.type === 'booted') {
+        state.ready = true;
+        mark(`booted ${state.spineIndex}${isActive ? '' : ' (preloaded)'}`);
+        // Settings or highlights may have changed while this chapter was loading.
+        if (state.bootKey !== JSON.stringify(currentOptions())) {
+          state.bootKey = JSON.stringify(currentOptions());
+          evaluateIn(slot, `__reader.configure(${scriptJSON(currentOptions())}, true)`);
         }
-        case 'ready': {
-          readyRef.current = true;
-          const pending = pendingRef.current;
-          pendingRef.current = {};
-          if (pending.goToEnd) {
-            evaluate('__reader.goToEnd()');
-          } else if (pending.fragment) {
-            evaluate(`__reader.goToFragment(${escapeForScript(pending.fragment)}, false)`);
-          } else if (pending.position && pending.position.elementPath.length > 0) {
-            evaluate(`__reader.goToPosition(${escapeForScript(pending.position)}, false)`);
-          }
-          pushHighlights();
-          evaluate('__reader.notifyState()');
+        if (state.annotations !== annotations) pushHighlights(slot);
+        if (isActive) {
           onLoadingChange(false);
-          break;
+          schedulePreload();
         }
+        return;
+      }
+      if (body.type === 'error') {
+        onError(`${body.context ?? 'reader'}: ${body.message ?? 'unknown error'}`);
+        return;
+      }
+      // Everything else is interaction with the visible chapter.
+      if (!isActive) return;
+
+      switch (body.type) {
         case 'pageChanged': {
-          const page = Number(body.page ?? 0);
-          const pageCount = Math.max(1, Number(body.pageCount ?? 1));
-          const progression = Number(body.progression ?? 0);
           const position = body.position && Array.isArray(body.position.elementPath) ? (body.position as TextPosition) : null;
           onSelection(null);
-          reportMeta(page, pageCount, progression, position);
+          reportMeta(Number(body.page ?? 0), Math.max(1, Number(body.pageCount ?? 1)), Number(body.progression ?? 0), position);
           break;
         }
         case 'reachedEnd':
-          if (spineIndexRef.current + 1 < publication.readingOrder.length) loadSpine(spineIndexRef.current + 1);
+          if (state.spineIndex + 1 < readingOrder.length) showChapter(state.spineIndex + 1);
           break;
         case 'reachedStart':
-          if (spineIndexRef.current > 0) loadSpine(spineIndexRef.current - 1, { goToEnd: true });
+          if (state.spineIndex > 0) showChapter(state.spineIndex - 1, { goToEnd: true });
           break;
         case 'selection': {
           const locatorBody = body.locator ?? {};
@@ -282,7 +421,7 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
           if (!start || typeof body.text !== 'string') break;
           onSelection({
             text: body.text,
-            locator: { kind: 'epub', spineIndex: spineIndexRef.current, start, end: locatorBody.end, text: body.text },
+            locator: { kind: 'epub', spineIndex: state.spineIndex, start, end: locatorBody.end, text: body.text },
             rect: body.rect ?? { x: 0, y: 0, width: 0, height: 0 },
           });
           break;
@@ -299,65 +438,71 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
         case 'link':
           if (typeof body.href === 'string') handleLink(body.href);
           break;
-        case 'error':
-          onError(`${body.context ?? 'reader'}: ${body.message ?? 'unknown error'}`);
-          break;
         default:
           break;
       }
     },
-    [currentOptions, evaluate, pushHighlights, onLoadingChange, onSelection, reportMeta, publication.readingOrder.length, loadSpine, onHighlightTapped, onTap, handleLink, onError],
+    [currentOptions, evaluateIn, annotations, pushHighlights, onLoadingChange, schedulePreload, onError, onSelection, reportMeta, readingOrder.length, showChapter, onHighlightTapped, onTap, handleLink],
   );
+
+  const onMessage0 = useCallback((event: WebViewMessageEvent) => handleMessage(0, event), [handleMessage]);
+  const onMessage1 = useCallback((event: WebViewMessageEvent) => handleMessage(1, event), [handleMessage]);
 
   useImperativeHandle(
     ref,
     () => ({
       nextPage: () => evaluate('if (window.__reader && !__reader.nextPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedEnd" }))'),
       previousPage: () => evaluate('if (window.__reader && !__reader.previousPage()) window.ReactNativeWebView.postMessage(JSON.stringify({ type: "reachedStart" }))'),
-      nextChapter: () => loadSpine(spineIndexRef.current + 1),
-      previousChapter: () => loadSpine(spineIndexRef.current - 1),
+      nextChapter: () => showChapter(slotsRef.current[activeRef.current].spineIndex + 1),
+      previousChapter: () => showChapter(slotsRef.current[activeRef.current].spineIndex - 1),
       goToLocator: (locator) => {
-        if (locator.spineIndex === spineIndexRef.current && readyRef.current) {
-          evaluate(`__reader.goToPosition(${escapeForScript(locator.start)}, true)`);
+        const state = slotsRef.current[activeRef.current];
+        if (locator.spineIndex === state.spineIndex && state.ready) {
+          evaluate(`__reader.goToPosition(${scriptJSON(locator.start)}, true)`);
         } else {
-          loadSpine(locator.spineIndex, { position: locator.start });
+          showChapter(locator.spineIndex, { position: locator.start });
         }
       },
       goToPath: (path, fragment) => {
+        if (!publication) return;
         const index = spineIndexForPath(publication, path);
         if (index < 0) return;
-        if (index === spineIndexRef.current && readyRef.current) {
-          if (fragment) evaluate(`__reader.goToFragment(${escapeForScript(fragment)}, true)`);
+        const state = slotsRef.current[activeRef.current];
+        if (index === state.spineIndex && state.ready) {
+          if (fragment) evaluate(`__reader.goToFragment(${scriptJSON(fragment)}, true)`);
           else evaluate('__reader.goToPage(0, true)');
         } else {
-          loadSpine(index, { fragment });
+          showChapter(index, { fragment });
         }
       },
       goToPage: (page) => evaluate(`__reader.goToPage(${Math.round(page)}, false)`),
       clearSelection: () => evaluate('window.__reader && __reader.clearSelection()'),
     }),
-    [evaluate, loadSpine, publication],
+    [evaluate, showChapter, publication],
   );
 
-  return (
-    <View style={[styles.container, { backgroundColor: palette.page }]}>
-      {source ? (
+  const renderSlot = (slot: SlotIndex) => {
+    const source = sources[slot];
+    if (!source) return null;
+    const visible = slot === active;
+    return (
+      <View
+        key={slot}
+        style={[StyleSheet.absoluteFill, { zIndex: visible ? 1 : 0, backgroundColor: palette.page }]}
+        pointerEvents={visible ? 'auto' : 'none'}
+        accessibilityElementsHidden={!visible}
+        importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>
         <WebView
-          ref={webViewRef}
-          key={book.id}
+          ref={webViewRefs[slot]}
           source={source}
-          originWhitelist={['*']}
+          // Only local book files load in place. Anything else is handed to the
+          // OS by the WebView itself, with no per-navigation round trip to JS.
+          originWhitelist={['file://*', 'about:*']}
           allowingReadAccessToURL={readAccessURL}
           allowFileAccess
           allowFileAccessFromFileURLs
           allowUniversalAccessFromFileURLs
-          onMessage={onMessage}
-          onShouldStartLoadWithRequest={(request) => {
-            const url = request.url;
-            if (url.startsWith('file://') || url === 'about:blank') return true;
-            Linking.openURL(url).catch(() => undefined);
-            return false;
-          }}
+          onMessage={slot === 0 ? onMessage0 : onMessage1}
           scrollEnabled={false}
           bounces={false}
           overScrollMode="never"
@@ -373,12 +518,21 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
           containerStyle={{ backgroundColor: palette.page }}
           onError={(event) => onError(event.nativeEvent.description)}
         />
-      ) : null}
+      </View>
+    );
+  };
+
+  return (
+    <View style={[styles.container, { backgroundColor: palette.page }]}>
+      {renderSlot(0)}
+      {renderSlot(1)}
     </View>
   );
 });
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  // The slots order themselves with zIndex; isolation keeps that ordering inside
+  // this component instead of lifting a web view above the reader chrome.
+  container: { flex: 1, isolation: 'isolate' },
   webView: { flex: 1, opacity: 0.99 },
 });
