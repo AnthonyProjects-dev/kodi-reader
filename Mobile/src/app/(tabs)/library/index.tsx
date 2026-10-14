@@ -126,6 +126,21 @@ export default function LibraryScreen() {
     [confirmRemove, rename],
   );
 
+  const showMore = useCallback(() => {
+    const openWeb = () => router.push('/web');
+    if (Platform.OS !== 'ios') {
+      openWeb();
+      return;
+    }
+    ActionSheetIOS.showActionSheetWithOptions(
+      { options: ['Cancel', 'Open Web Page', 'Add Sample Books'], cancelButtonIndex: 0 },
+      (index) => {
+        if (index === 1) openWeb();
+        if (index === 2) addSamples().catch(() => undefined);
+      },
+    );
+  }, [router, addSamples]);
+
   const continueReading = books.find((book) => book.progress > 0.001 && book.progress < 0.995);
   const shelf = continueReading ? books.filter((book) => book.id !== continueReading.id) : books;
 
@@ -133,14 +148,7 @@ export default function LibraryScreen() {
     <>
       <Stack.Screen options={{ title: 'Library' }}>
         <Stack.Toolbar placement="right" tintColor={palette.accent}>
-          <Stack.Toolbar.Menu icon="ellipsis.circle" accessibilityLabel="More">
-            <Stack.Toolbar.MenuAction icon="globe" onPress={() => router.push('/web')}>
-              Open Web Page
-            </Stack.Toolbar.MenuAction>
-            <Stack.Toolbar.MenuAction icon="books.vertical" onPress={addSamples}>
-              Add Sample Books
-            </Stack.Toolbar.MenuAction>
-          </Stack.Toolbar.Menu>
+          <Stack.Toolbar.Button icon="ellipsis" accessibilityLabel="More" onPress={showMore} />
           <Stack.Toolbar.Button icon="plus" variant="prominent" tintColor={palette.accent} accessibilityLabel="Open Document" onPress={pickDocument} disabled={busy} />
         </Stack.Toolbar>
       </Stack.Screen>

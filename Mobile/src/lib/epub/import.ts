@@ -129,8 +129,10 @@ export async function importDocument(
       const coverSource = new File(finalDirectory, ...publication.coverPath.split('/'));
       const extension = extensionOf(publication.coverPath) || 'jpg';
       const coverTarget = new File(coversDirectory, `${safeID}.${extension}`);
+      // A File's `exists` can read stale right after a copy, so a copy that
+      // did not throw is taken as success.
       if (!coverTarget.exists) coverSource.copy(coverTarget);
-      if (coverTarget.exists) coverRelativePath = `Covers/${safeID}.${extension}`;
+      coverRelativePath = `Covers/${safeID}.${extension}`;
     } catch (error) {
       console.warn('Cover copy failed for', safeID, publication.coverPath, error);
     }

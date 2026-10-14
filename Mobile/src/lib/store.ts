@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 
-import { ensureLayout, libraryFile } from './files';
+import { ensureLayout, fileAt, libraryFile, sanitizedFileName } from './files';
 import { DEFAULT_SETTINGS, type Annotation, type BookRecord, type Locator, type ReaderSettings } from './types';
 
 /**
@@ -50,6 +50,21 @@ export function flush() {
   }
 }
 
+/** Books imported before the cover-path fix may have a cover on disk but no path recorded. */
+function withRecoveredCovers(books: Record<string, BookRecord>): Record<string, BookRecord> {
+  const next: Record<string, BookRecord> = {};
+  for (const [id, book] of Object.entries(books)) {
+    if (book.coverRelativePath || book.kind !== 'epub') {
+      next[id] = book;
+      continue;
+    }
+    const stem = sanitizedFileName(id);
+    const found = ['jpg', 'jpeg', 'png', 'gif', 'webp'].map((ext) => `Covers/${stem}.${ext}`).find((path) => fileAt(path).exists);
+    next[id] = found ? { ...book, coverRelativePath: found } : book;
+  }
+  return next;
+}
+
 export function loadLibrary() {
   if (state.loaded) return;
   try {
@@ -58,7 +73,7 @@ export function loadLibrary() {
       const parsed = JSON.parse(libraryFile.textSync()) as Partial<LibraryState>;
       state = {
         version: CURRENT_VERSION,
-        books: parsed.books ?? {},
+        books: withRecoveredCovers(parsed.books ?? {}),
         settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
         loaded: true,
       };
