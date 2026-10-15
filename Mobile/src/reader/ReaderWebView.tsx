@@ -9,7 +9,7 @@ import { injectChapterHead } from './chapterDocument';
 import { highlightPayload, inlineStyle, cssVariables, runtimeOptions } from './settingsToCss';
 import { chapterTitle as chapterTitleFor, spineIndexForPath } from '@/lib/epub/parse';
 import { extensionOf, resolveHref, splitFragment } from '@/lib/epub/path';
-import { directoryAt, directoryURL } from '@/lib/files';
+import { directoryAt, directoryURL, extractedDirectory as extractedRoot } from '@/lib/files';
 import type { Palette } from '@/lib/theme';
 import type { Annotation, BookRecord, Locator, Publication, ReaderSettings, TextPosition } from '@/lib/types';
 
@@ -124,7 +124,13 @@ export const ReaderWebView = forwardRef<ReaderHandle, Props>(function ReaderWebV
   const extractedDirectory = useMemo(() => directoryAt(book?.extractedRelativePath ?? ''), [book?.extractedRelativePath]);
   const readingOrder = useMemo(() => publication?.readingOrder ?? [], [publication]);
   const weights = useMemo(() => publication?.weights ?? [], [publication]);
-  const readAccessURL = useMemo(() => directoryURL(extractedDirectory) + '/', [extractedDirectory]);
+  // One fixed read-access root for the web views' whole lifetime. WebKit reloads the
+  // current page whenever this prop changes, so a per-book value made every book open
+  // reload the idle page (or the previous book's chapter, which then failed outside
+  // the new root) before the real chapter loaded. Extracted/ holds only book contents:
+  // library.json, notes and settings stay outside it, and the chapter content policy
+  // blocks publisher scripts, so a book still cannot read private library data.
+  const readAccessURL = useMemo(() => directoryURL(extractedRoot) + '/', []);
   const totalWeight = useMemo(() => weights.reduce((sum, weight) => sum + weight, 0), [weights]);
 
   const overallProgress = useCallback(
